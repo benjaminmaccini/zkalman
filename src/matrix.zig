@@ -39,8 +39,8 @@ pub fn MatrixType(
     comptime n: usize,
     comptime m: usize,
 ) type {
-    if (@typeInfo(Type) != .Float and @typeInfo(Type) != .Int and @typeInfo(Type) != .Pointer) {
-        @compileError("Vector types can only be; int, float, or a pointer");
+    if (@typeInfo(Type) != .Bool and @typeInfo(Type) != .Float and @typeInfo(Type) != .Int and @typeInfo(Type) != .Pointer) {
+        @compileError("Vector types can only be; bool, int, float, or a pointer");
     }
     return struct {
         // The vector length, assume that scalars are not recommended
@@ -50,20 +50,16 @@ pub fn MatrixType(
         const rows = n;
         const cols = m;
 
-        comptime data: [rows * cols]Type = undefined,
+        data: [rows * cols]Type,
 
         pub fn init(comptime in: [rows][cols]Type) Matrix {
-            comptime var out: [rows * cols]Type = undefined;
-            comptime var idx: usize = 0;
-            inline for (in) |row| {
-                inline for (row) |cell| {
-                    out[idx] = cell;
-                    idx += 1;
+            var newMat = Matrix{ .data = undefined };
+            inline for (in, 0..) |row, ridx| {
+                inline for (row, 0..) |cell, cidx| {
+                    newMat.set(cell, ridx, cidx);
                 }
             }
-            return .{
-                .data = out,
-            };
+            return newMat;
         }
 
         pub fn zeros() Matrix {
@@ -77,12 +73,21 @@ pub fn MatrixType(
             return [2]i64{ rows, cols };
         }
 
-        pub fn get(mat: Matrix, row: usize, col: usize) Type {
+        pub inline fn get(mat: *Matrix, row: usize, col: usize) Type {
             return mat.data[cols * row + col];
         }
 
-        pub fn set(mat: Matrix, val: Type, row: usize, col: usize) void {
+        pub inline fn set(mat: *Matrix, val: Type, row: usize, col: usize) void {
             mat.data[cols * row + col] = val;
+        }
+
+        pub fn swapRows(mat: *Matrix, ridx1: usize, ridx2: usize) Matrix {
+            for (mat.data[cols * ridx1 .. (ridx1 + 1) * cols], mat.data[cols * ridx2 .. (ridx2 + 1) * cols], 0..) |r1, r2, i| {
+                const tempVal = r1;
+                mat.set(r2, ridx1, i);
+                mat.set(tempVal, ridx2, i);
+            }
+            return mat.*;
         }
 
         // Only expose certain properties for square matrices
@@ -98,60 +103,92 @@ pub fn MatrixType(
 
                 // Matrix computes the determinant for the matrix data
                 // using the LU decomposition algorithm
-                pub fn det(mat: Matrix) f32 {
-                    const decomp = mat.luDecomposition();
-                    const upper = decomp[1];
+                pub fn det(mat: *Matrix) Type {
+                    var p = mat.pivot();
+                    var decomp = mat.luDecomposition(&p[0]);
+                    // Get the pivot's determinant
+                    var det_p = std.math.pow(Type, -1, p[1]);
+
+                    // Get the determinant for the upper matrix
+                    var upper = decomp[2];
                     var prod: Type = 1;
                     for (0..rows) |i| {
                         prod *= upper.get(i, i);
                     }
-                    return prod;
+                    return det_p * prod;
                 }
 
-                // Perform LU Decomposition using Doolittle's Method
-                pub fn luDecomposition(mat: Matrix) [2]Matrix {
-                    const lower = Matrix.zeros();
-                    const upper = Matrix.zeros();
-
-                    for (0..rows) |i| {
-                        // Upper
-                        for (i..rows) |k| {
-                            var sum: Type = 0;
-                            for (0..i) |j| {
-                                sum += lower.get(i, j) * upper.get(j, k);
+                // Return the pivot matrix and the number of swaps
+                // For each column, find the max value below (and including) the current diagonal
+                pub fn pivot(mat: *Matrix) struct { Matrix, Type } {
+                    var p = Matrix.identity();
+                    var numSwaps: Type = 0;
+                    for (0..cols) |cidx| {
+                        var max: Type = undefined;
+                        var midx: usize = 0;
+                        for (cidx..rows) |ridx| {
+                            const newMax = @max(mat.get(ridx, cidx), max);
+                            if (newMax != max) {
+                                max = newMax;
+                                midx = cidx;
                             }
+                        }
 
-                            upper.set(mat.get(i, k) - sum, i, k);
+                        // Swap the rows
+                        if (midx != cidx) {
+                            numSwaps += 1;
+                            p = p.swapRows(midx, cidx);
+                        }
+                    }
+                    return .{ p, numSwaps };
+                }
+
+                // Perform LU Decomposition with partial pivoting to avoid rounding errors
+                // Optionally, provide a pivot matrix. Useful for when computing the determinant
+                // when the number of swaps needs to be kept track of
+                pub fn luDecomposition(mat: *Matrix, p: ?*Matrix) [3]Matrix {
+                    var P = @constCast(p orelse &mat.pivot()[0]).*;
+                    var L = Matrix.zeros();
+                    var U = Matrix.zeros();
+                    var PA = P.mul(mat);
+
+                    for (0..rows) |j| {
+                        // Set lower to unity
+                        L.set(1, j, j);
+
+                        // Upper
+                        for (0..j + 1) |i| {
+                            var sum: Type = 0;
+                            for (0..i) |k| {
+                                sum += L.get(i, k) * U.get(k, j);
+                            }
+                            U.set(PA.get(i, j) - sum, i, j);
                         }
 
                         // Lower
-                        for (i..rows) |k| {
-                            if (i == k) {
-                                lower.set(1, i, i);
-                            } else {
-                                var sum: Type = 0;
-                                for (0..i) |j| {
-                                    sum += lower.get(k, j) * upper.get(j, i);
-                                }
-
-                                lower.set((mat.get(k, i) - sum) / upper.get(i, i), k, i);
+                        for (j..rows) |i| {
+                            var sum: Type = 0;
+                            for (0..j) |k| {
+                                sum += L.get(i, k) * U.get(k, j);
                             }
+
+                            L.set((PA.get(i, j) - sum) / U.get(j, j), i, j);
                         }
                     }
-                    return [2]Matrix{ lower, upper };
+                    return [3]Matrix{ P, L, U };
                 }
             }
         else
             struct {};
 
         // This is a meta function that builds the type signatures for the transpose function
-        fn buildTransposeType(comptime T: type) type {
-            return MatrixType(Type, T.cols, T.rows);
+        fn buildTransposeType() type {
+            return MatrixType(Type, cols, rows);
         }
 
-        pub fn transpose(comptime mat: Matrix) buildTransposeType(@TypeOf(mat)) {
-            const newMatrixType = buildTransposeType(@TypeOf(mat));
-            const out = newMatrixType.init();
+        pub fn transpose(mat: *Matrix) buildTransposeType() {
+            const newMatrixType = buildTransposeType();
+            var out = newMatrixType{ .data = undefined };
             for (0..rows) |ridx| {
                 for (0..cols) |cidx| {
                     out.set(mat.get(ridx, cidx), cidx, ridx);
@@ -160,7 +197,7 @@ pub fn MatrixType(
             return out;
         }
 
-        pub fn scalarMul(a: Matrix, s: Type) Matrix {
+        pub fn scalarMul(a: *Matrix, s: Type) Matrix {
             comptime var j: usize = 0;
             var out: [rows * cols]Type = undefined;
             const v: @Vector(VEC_LEN, Type) = @splat(s);
@@ -174,7 +211,7 @@ pub fn MatrixType(
         }
 
         /// Add two matrices together. This requires that they are of the same shape
-        pub fn add(a: Matrix, b: Matrix) Matrix {
+        pub fn add(a: *Matrix, b: *Matrix) Matrix {
             comptime var j: usize = 0;
             var out: [rows * cols]Type = undefined;
             inline while (j + VEC_LEN < a.data.len) : (j += VEC_LEN) {
@@ -189,8 +226,9 @@ pub fn MatrixType(
             };
         }
 
-        pub fn sub(a: Matrix, b: Matrix) Matrix {
-            return a.add(b.scalarMul(-1));
+        pub fn sub(a: *Matrix, b: *Matrix) Matrix {
+            var neg = b.scalarMul(-1);
+            return a.add(&neg);
         }
 
         // This is a meta function that builds the type signatures for mul()
@@ -198,81 +236,163 @@ pub fn MatrixType(
             return MatrixType(Type, T.rows, S.cols);
         }
 
-        pub fn mul(comptime a: Matrix, comptime b: anytype) buildMulReturnType(@TypeOf(a), @TypeOf(b)) {
+        pub fn mul(a: *Matrix, b: anytype) buildMulReturnType(@TypeOf(a.*), @TypeOf(b.*)) {
             return dot_naive(a, b);
         }
 
         // Compute the dot product between matrices
         // This is just the naive implementation to work out the proper signatures
-        fn dot_naive(a: Matrix, b: anytype) buildMulReturnType(@TypeOf(a), @TypeOf(b)) {
-            if (cols != @TypeOf(b).rows) {
+        fn dot_naive(a: *Matrix, b: anytype) buildMulReturnType(@TypeOf(a.*), @TypeOf(b.*)) {
+            if (cols != @TypeOf(b.*).rows) {
                 @compileError("Invalid dimensions for dot product");
             }
-            const newMatrixType = buildMulReturnType(@TypeOf(a), @TypeOf(b));
-            const out = newMatrixType.init();
+            const newMatrixType = buildMulReturnType(@TypeOf(a.*), @TypeOf(b.*));
+            var out = newMatrixType{ .data = undefined };
             for (0..rows) |i| {
-                for (0..@TypeOf(b).cols) |j| {
+                for (0..@TypeOf(b.*).cols) |j| {
+                    var v: Type = 0;
                     for (0..rows) |k| {
-                        out.set(
-                            a.get(i, k) + b.get(k, j),
-                            i,
-                            j,
-                        );
+                        v += a.get(i, k) * b.get(k, j);
                     }
+                    out.set(v, i, j);
                 }
             }
             return out;
         }
 
-        pub fn eq(a: Matrix, b: Matrix) bool {
+        pub fn eq(a: *Matrix, b: *Matrix) bool {
             comptime var j: usize = 0;
             var result: bool = true;
             inline while (j + VEC_LEN < a.data.len) : (j += VEC_LEN) {
                 const u: @Vector(VEC_LEN, Type) = a.data[j..][0..VEC_LEN].*;
                 const v: @Vector(VEC_LEN, Type) = b.data[j..][0..VEC_LEN].*;
-                if (@reduce(.And, u == v)) {
+
+                const eqStatement = switch (@typeInfo(Type)) {
+                    inline .Bool => u == v,
+                    inline .Float => blk: {
+                        const close: @Vector(VEC_LEN, Type) = @splat(1e-6);
+                        break :blk @fabs(u - v) < close;
+                    },
+                    inline .Int => u == v,
+                    else => unreachable,
+                };
+                if (!@reduce(.And, eqStatement)) {
+                    // std.debug.print("\n{} != {}\n", .{ a, b });
                     result = false;
                     break;
                 }
             }
             return result;
         }
+
+        pub fn format(
+            mat: Matrix,
+            comptime fmt: []const u8,
+            options: std.fmt.FormatOptions,
+            writer: anytype,
+        ) !void {
+            var matPtr: *Matrix = @constCast(&mat);
+            _ = fmt;
+            _ = options;
+            try writer.writeAll(@typeName(Matrix));
+            try writer.writeAll("[\n");
+            for (0..rows) |ridx| {
+                try writer.writeAll("\t[");
+                for (0..cols) |cidx| {
+                    try writer.print("{d:.4}", .{matPtr.get(ridx, cidx)});
+                    if (cidx != cols - 1) {
+                        try writer.writeByte(',');
+                    }
+                }
+                try writer.writeByte(']');
+                if (ridx != rows - 1) {
+                    try writer.writeAll(",\n");
+                }
+            }
+            try writer.writeAll("]\n");
+        }
     };
 }
 
 test "add" {
     const int2x2 = MatrixType(i64, 2, 2);
-    const A = int2x2.init(
+    var A = int2x2.init(
         [2][2]i64{
             [2]i64{ 1, 1 },
             [2]i64{ 0, 1 },
         },
     );
-    const B = int2x2.init(
+    var B = int2x2.init(
         [2][2]i64{
             [2]i64{ -1, -1 },
             [2]i64{ 0, -1 },
         },
     );
-    const C = A.add(B);
-    try expect(C.eq(int2x2.zeros()));
+    var C = A.add(&B);
+    var zeros = int2x2.zeros();
+    try expect(C.eq(&zeros));
 }
 
 test "sub" {
     const int2x2 = MatrixType(i64, 2, 2);
-    const A = int2x2.init(
+    var A = int2x2.init(
         [2][2]i64{
             [2]i64{ 1, 1 },
             [2]i64{ 0, 1 },
         },
     );
-    const C = A.sub(A);
-    try expect(C.eq(int2x2.zeros()));
+    var C = A.sub(&A);
+    var zeros = int2x2.zeros();
+    try expect(C.eq(&zeros));
+}
+
+test "swapRows" {
+    const int3x3 = MatrixType(i64, 3, 3);
+    var A = int3x3.init(
+        [3][3]i64{
+            [3]i64{ 1, 2, 3 },
+            [3]i64{ 0, 0, 0 },
+            [3]i64{ 4, 5, 6 },
+        },
+    );
+    var E = int3x3.init(
+        [3][3]i64{
+            [3]i64{ 4, 5, 6 },
+            [3]i64{ 0, 0, 0 },
+            [3]i64{ 1, 2, 3 },
+        },
+    );
+
+    A = A.swapRows(0, 2);
+    try expect(A.eq(&E));
+}
+
+test "pivot" {
+    const float3x3 = MatrixType(f32, 3, 3);
+    var A = float3x3.init(
+        [3][3]f32{
+            [3]f32{ 1, 2, 3 },
+            [3]f32{ 2, -4, 6 },
+            [3]f32{ 3, -9, -3 },
+        },
+    );
+    var E = float3x3.init(
+        [3][3]f32{
+            [3]f32{ 0, 0, 1 },
+            [3]f32{ 1, 0, 0 },
+            [3]f32{ 0, 1, 0 },
+        },
+    );
+
+    var p = A.pivot();
+
+    try expect(p[0].eq(&E));
+    try expectEqual(p[1], 2);
 }
 
 test "transpose" {
     const int2x3 = MatrixType(i64, 2, 3);
-    const A = int2x3.init(
+    var A = int2x3.init(
         [2][3]i64{
             [3]i64{ 1, 2, 3 },
             [3]i64{ 4, 5, 6 },
@@ -281,7 +401,7 @@ test "transpose" {
 
     // Expected
     const int3x2 = MatrixType(i64, 3, 2);
-    const E = int3x2.init(
+    var E = int3x2.init(
         [3][2]i64{
             [2]i64{ 1, 4 },
             [2]i64{ 2, 5 },
@@ -290,32 +410,33 @@ test "transpose" {
     );
 
     // Actual
-    const C = A.transpose();
-    try expect(C.eq(E));
+    var C = A.transpose();
+    try expect(C.eq(&E));
 }
 
 test "scalarMul" {
     const float2x2 = MatrixType(f32, 2, 2);
-    const A = float2x2.init(
+    var A = float2x2.init(
         [2][2]f32{
             [2]f32{ 0.5, 0 },
             [2]f32{ 0, 0.5 },
         },
     );
-    const B = A.scalarMul(2);
-    try expect(B.eq(float2x2.identity()));
+    var B = A.scalarMul(2);
+    var id = float2x2.identity();
+    try expect(B.eq(&id));
 }
 
 test "mul" {
     const float2x3 = MatrixType(f32, 2, 3);
     const float3x1 = MatrixType(f32, 3, 1);
-    const A = float2x3.init(
+    var A = float2x3.init(
         [2][3]f32{
             [3]f32{ 1, 2, 3 },
             [3]f32{ 4, 5, 6 },
         },
     );
-    const B = float3x1.init(
+    var B = float3x1.init(
         [3][1]f32{
             [1]f32{-1},
             [1]f32{0},
@@ -325,7 +446,7 @@ test "mul" {
 
     // Expected
     const float2x1 = MatrixType(f32, 2, 1);
-    const E = float2x1.init(
+    var E = float2x1.init(
         [2][1]f32{
             [1]f32{2},
             [1]f32{2},
@@ -333,13 +454,43 @@ test "mul" {
     );
 
     // Actual
-    const C = A.mul(B);
-    try expect(C.eq(E));
+    var C = A.mul(&B);
+    try expect(C.eq(&E));
 }
 
+test "mul2" {
+    const float3x3 = MatrixType(f32, 3, 3);
+    var A = float3x3.init(
+        [3][3]f32{
+            [3]f32{ 1, 2, 3 },
+            [3]f32{ 4, 5, 6 },
+            [3]f32{ 7, 8, 9 },
+        },
+    );
+    var B = float3x3.init(
+        [3][3]f32{
+            [3]f32{ 1, -1, 0 },
+            [3]f32{ -1, 0, 1 },
+            [3]f32{ 0, -1, 1 },
+        },
+    );
+
+    // Expected
+    var E = float3x3.init(
+        [3][3]f32{
+            [3]f32{ -1, -4, 5 },
+            [3]f32{ -1, -10, 11 },
+            [3]f32{ -1, -16, 17 },
+        },
+    );
+
+    // Actual
+    var C = A.mul(&B);
+    try expect(C.eq(&E));
+}
 test "det" {
     const float3x3 = MatrixType(f32, 3, 3);
-    const A = float3x3.init(
+    var A = float3x3.init(
         [3][3]f32{
             [3]f32{ 2, -1, -2 },
             [3]f32{ -4, 6, 3 },
@@ -348,36 +499,48 @@ test "det" {
     );
 
     const det = A.det();
-    try expectEqual(det, 38);
+    try expectEqual(det, 24);
 }
 
 test "luDecomposition" {
     const float3x3 = MatrixType(f32, 3, 3);
-    const A = float3x3.init(
+    var A = float3x3.init(
         [3][3]f32{
-            [3]f32{ 2, -1, -2 },
-            [3]f32{ -4, 6, 3 },
-            [3]f32{ -4, -2, 8 },
+            [3]f32{ 1, 2, 3 },
+            [3]f32{ 2, -4, 6 },
+            [3]f32{ 3, -9, -3 },
         },
     );
-    const L = float3x3.init(
+    var L = float3x3.init(
         [3][3]f32{
             [3]f32{ 1, 0, 0 },
-            [3]f32{ -2, 1, 0 },
-            [3]f32{ -1, -1.25, 1 },
+            [3]f32{ 1.0 / 3.0, 1, 0 },
+            [3]f32{ 2.0 / 3.0, 2.0 / 5.0, 1 },
         },
     );
-    const U = float3x3.init(
+    var U = float3x3.init(
         [3][3]f32{
-            [3]f32{ 2, -1, -2 },
-            [3]f32{ 0, 4, -1 },
-            [3]f32{ 0, 0, 4.75 },
+            [3]f32{ 3, -9, -3 },
+            [3]f32{ 0, 5, 4 },
+            [3]f32{ 0, 0, 32.0 / 5.0 },
         },
     );
-    const decomp = A.luDecomposition();
-    const lower = decomp[0];
-    const upper = decomp[1];
+    var P = float3x3.init(
+        [3][3]f32{
+            [3]f32{ 0, 0, 1 },
+            [3]f32{ 1, 0, 0 },
+            [3]f32{ 0, 1, 0 },
+        },
+    );
+    var decomp = A.luDecomposition(null);
 
-    try expect(lower.eq(L));
-    try expect(upper.eq(U));
+    // Check PA = LU
+    var PA = decomp[0].mul(&A);
+    var LU = decomp[1].mul(&decomp[2]);
+
+    try expect(PA.eq(&LU));
+
+    try expect(decomp[0].eq(&P));
+    try expect(decomp[1].eq(&L));
+    try expect(decomp[2].eq(&U));
 }
