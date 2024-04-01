@@ -24,7 +24,7 @@
 //!         [_]i64{1},
 //!     },
 //! );
-//! var result = a.mul(b);
+//! var result = a.mul(&b);
 //! std.debug.assert(std.mem.eql(i64, result.shape(), [2]i64{2, 1}));
 //! std.debug.assert(result.data[0][0] == 2);
 //! std.debug.assert(result.data[1][0] == 1);
@@ -81,6 +81,41 @@ pub fn MatrixType(
             mat.data[cols * row + col] = val;
         }
 
+        // This is a meta function that builds the type signatures for the column vector
+        fn buildColumnVectorType() type {
+            return MatrixType(Type, rows, 1);
+        }
+
+        // This is a meta function that builds the type signatures for the row vector
+        fn buildRowVectorType() type {
+            return MatrixType(Type, 1, cols);
+        }
+
+        pub fn getCol(mat: *Matrix, cidx: usize) buildColumnVectorType() {
+            var vecType = buildColumnVectorType();
+            var vecData: [rows]Type = undefined;
+            for (0..rows) |ridx| {
+                vecData.set(mat.get(ridx, cidx), ridx, cidx);
+            }
+            return vecType{
+                .data = vecData,
+            };
+        }
+
+        pub fn setRow(mat: *Matrix, ridx: usize, row: buildRowVectorType()) Matrix {
+            for (0..cols) |cidx| {
+                mat.set(row.get(0, cidx), ridx, cidx);
+            }
+            return mat;
+        }
+
+        pub fn setCol(mat: *Matrix, cidx: usize, col: buildColumnVectorType()) Matrix {
+            for (0..rows) |ridx| {
+                mat.set(col.get(ridx, 0), ridx, cidx);
+            }
+            return mat;
+        }
+
         pub fn swapRows(mat: *Matrix, ridx1: usize, ridx2: usize) Matrix {
             for (mat.data[cols * ridx1 .. (ridx1 + 1) * cols], mat.data[cols * ridx2 .. (ridx2 + 1) * cols], 0..) |r1, r2, i| {
                 const tempVal = r1;
@@ -118,6 +153,61 @@ pub fn MatrixType(
                     return det_p * prod;
                 }
 
+                pub fn inv(mat: *Matrix) !Matrix {
+                    // LU Decomposition yields LU = PA
+                    // this is the same as LUA^-1 = P
+                    var plu = mat.luDecomposition(null);
+                    var P = plu[0];
+                    var L = plu[1];
+                    var U = plu[2];
+
+                    // Check singular
+                    var prod: Type = 1;
+                    for (0..rows) |i| {
+                        prod *= U.get(i, i);
+                    }
+                    const eqStatement = switch (@typeInfo(Type)) {
+                        .Float => @fabs(prod) < 1e-6,
+                        .Int => prod == 0,
+                        else => unreachable,
+                    };
+                    if (eqStatement) {
+                        return error.SingularMatrixHasNoInverse;
+                    }
+
+                    // For each column n of P, solve the linear system: LUa_n = p_n
+                    // using forward substitution, followed by back substitution
+                    // This is specific for linear equations of the form LUB = P
+                    var B = Matrix.zeros();
+                    for (0..cols) |cidx| {
+                        for (0..rows) |i| {
+                            B.set(P.get(i, cidx), i, cidx);
+                            for (0..i) |j| {
+                                B.set(B.get(i, cidx) - L.get(i, j) * B.get(j, cidx), i, cidx);
+                            }
+                            B.set(B.get(i, cidx) / L.get(i, i), i, cidx);
+                        }
+                    }
+                    for (0..cols) |cidx| {
+                        var i: usize = rows - 1;
+                        while (i > 0) : (i -= 1) {
+                            for (i + 1..rows) |j| {
+                                B.set(B.get(i, cidx) - U.get(i, j) * B.get(j, cidx), i, cidx);
+                            }
+                            B.set(B.get(i, cidx) / U.get(i, i), i, cidx);
+                        } else {
+                            // There might be a better way to do this, but Zig requires a positive
+                            // integer for loops, but we are iterating backwards in this case. To
+                            // prevent an overflow error, we can just handle the final case here instead
+                            for (i + 1..rows) |j| {
+                                B.set(B.get(i, cidx) - U.get(i, j) * B.get(j, cidx), i, cidx);
+                            }
+                            B.set(B.get(i, cidx) / U.get(i, i), i, cidx);
+                        }
+                    }
+                    return B;
+                }
+
                 // Return the pivot matrix and the number of swaps
                 // For each column, find the max value below (and including) the current diagonal
                 pub fn pivot(mat: *Matrix) struct { Matrix, Type } {
@@ -147,6 +237,10 @@ pub fn MatrixType(
                 // Optionally, provide a pivot matrix. Useful for when computing the determinant
                 // when the number of swaps needs to be kept track of
                 pub fn luDecomposition(mat: *Matrix, p: ?*Matrix) [3]Matrix {
+                    var I = Matrix.identity();
+                    if (mat.eq(&I)) {
+                        return [3]Matrix{ I, I, I };
+                    }
                     var P = @constCast(p orelse &mat.pivot()[0]).*;
                     var L = Matrix.zeros();
                     var U = Matrix.zeros();
@@ -202,8 +296,9 @@ pub fn MatrixType(
             var out: [rows * cols]Type = undefined;
             const v: @Vector(VEC_LEN, Type) = @splat(s);
             inline while (j + VEC_LEN < a.data.len) : (j += VEC_LEN) {
-                const u: @Vector(VEC_LEN, Type) = a.data;
-                out = out ++ (u * v);
+                const u: @Vector(VEC_LEN, Type) = a.data[j..][0..VEC_LEN].*;
+                const slice: [VEC_LEN]Type = u * v;
+                @memcpy(out[j .. j + VEC_LEN], &slice);
             }
             return .{
                 .data = out,
@@ -218,7 +313,7 @@ pub fn MatrixType(
                 const u: @Vector(VEC_LEN, Type) = a.data[j..][0..VEC_LEN].*;
                 const v: @Vector(VEC_LEN, Type) = b.data[j..][0..VEC_LEN].*;
                 const slice: [VEC_LEN]Type = u + v;
-                out = out ++ slice;
+                @memcpy(out[j .. j + VEC_LEN], &slice);
             }
 
             return .{
@@ -543,4 +638,57 @@ test "luDecomposition" {
     try expect(decomp[0].eq(&P));
     try expect(decomp[1].eq(&L));
     try expect(decomp[2].eq(&U));
+}
+
+test "inv" {
+    const int3x3 = MatrixType(u8, 3, 3);
+    var I = int3x3.init([3][3]u8{
+        [3]u8{ 1, 0, 0 },
+        [3]u8{ 0, 1, 0 },
+        [3]u8{ 0, 0, 1 },
+    });
+
+    var I_inv = try I.inv();
+    try expect(I.eq(&I_inv));
+}
+
+test "inv2" {
+    const float3x3 = MatrixType(f32, 3, 3);
+    var A = float3x3.init(
+        [3][3]f32{
+            [3]f32{ 1, 2, 3 },
+            [3]f32{ 2, -4, 6 },
+            [3]f32{ 3, -9, -3 },
+        },
+    );
+
+    var Ep = float3x3.init(
+        [3][3]f32{
+            [3]f32{ 66, -21, 24 },
+            [3]f32{ 24, -12, 0 },
+            [3]f32{ -6, 15, -8 },
+        },
+    );
+    var E = Ep.scalarMul(1.0 / 96.0);
+    var B = try A.inv();
+    try expect(B.eq(&E));
+}
+
+test "inv3" {
+    const float2x2 = MatrixType(f32, 2, 2);
+    var A = float2x2.init(
+        [2][2]f32{
+            [2]f32{ 2, 1 },
+            [2]f32{ 1, 1 },
+        },
+    );
+    var E = float2x2.init(
+        [2][2]f32{
+            [2]f32{ 1, -1 },
+            [2]f32{ -1, 2 },
+        },
+    );
+
+    var B = try A.inv();
+    try expect(B.eq(&E));
 }
