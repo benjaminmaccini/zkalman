@@ -113,7 +113,7 @@ pub fn KalmanFilterType(comptime Type: type, n: comptime_int, m: comptime_int) t
 // degree angle. The state covariance matrix is the identity since we are using kinematics.
 // Although it is possible to derive the initial state solely based on measurements, in this example
 // we will set the heading and position
-test "kalman" {
+test "kalman: unit" {
     var measurements = [2][]f32{
         [_]f32{ 1, 2, 5, 8 }, // x pos
         [_]f32{ 3, 4, 9, 10 }, // y pos

@@ -277,7 +277,7 @@ pub fn MatrixType(
 
         // This is a meta function that builds the type signatures for the transpose function
         fn buildTransposeType() type {
-            return MatrixType(Type, cols, rows);
+            return if (rows == cols) Matrix else MatrixType(Type, cols, rows);
         }
 
         pub fn transpose(mat: *Matrix) buildTransposeType() {
